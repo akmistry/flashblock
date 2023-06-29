@@ -55,14 +55,14 @@ func (c *Chip) EraseBlock(index int) error {
 	return c.blocks[index].Erase()
 }
 
-func (c *Chip) WriteAtBlock(index int, p []byte, off int64) (int, error) {
+func (c *Chip) WriteAtBlock(index int64, p []byte, off int64) (int, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
 	return c.blocks[index].WriteAt(p, off)
 }
 
-func (c *Chip) ReadAtBlock(index int, p []byte, off int64) (int, error) {
+func (c *Chip) ReadAtBlock(index int64, p []byte, off int64) (int, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 

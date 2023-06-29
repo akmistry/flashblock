@@ -68,7 +68,6 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 	}
 	log.Printf("block map entries: %d, erase blocks: %d",
 		len(f.blockMap), len(f.eraseBlocks))
-	log.Printf("free erase blocks: %d", f.freeBlocks.Len())
 	return f
 }
 
@@ -115,7 +114,6 @@ func (f *Ftl) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
-	log.Printf("free erase blocks: %d", f.freeBlocks.Len())
 	if f.freeBlocks.Len() == 0 {
 		return nil
 	}
@@ -155,6 +153,17 @@ func (f *Ftl) getCurrentBlock(block int64) *eraseBlockInfo {
 	return f.eraseBlocks[blockIndex/f.chip.EraseBlockSize()]
 }
 
+func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
+	if len(ebi.contents) > 0 {
+		return
+	}
+
+	log.Println("==== Erase block %d empty, erasing and freeing", ebi.index)
+	ebi.nextWrite = 0
+	f.chip.EraseBlock(ebi.index)
+	f.freeBlocks.PushBack(ebi)
+}
+
 func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 	if off%f.blockSize != 0 {
 		return 0, errUnalignedOffset
@@ -171,6 +180,7 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 		ebi := f.getCurrentBlock(block)
 		if ebi != nil {
 			delete(ebi.contents, block)
+			f.freeEraseBlockIfEmpty(ebi)
 		}
 		ebi = f.fetchWriteBlock()
 
@@ -195,8 +205,9 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-/*
 func (f *Ftl) Trim(off int64, length uint32) error {
+	log.Printf("Trim(off = %d, len = %d)", off, length)
+
 	if off%f.blockSize != 0 {
 		return errUnalignedOffset
 	} else if int64(length)%f.blockSize != 0 {
@@ -206,6 +217,16 @@ func (f *Ftl) Trim(off int64, length uint32) error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
+	for length > 0 {
+		block := off / f.blockSize
+		ebi := f.getCurrentBlock(block)
+		if ebi != nil {
+			delete(ebi.contents, block)
+			f.freeEraseBlockIfEmpty(ebi)
+		}
+		f.blockMap[block] = -1
+		length -= uint32(f.blockSize)
+	}
+
 	return nil
 }
-*/

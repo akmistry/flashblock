@@ -48,7 +48,7 @@ func (c *Chip) EraseBlockCount() int {
 	return len(c.blocks)
 }
 
-func (c *Chip) EraseBlock(index int) error {
+func (c *Chip) EraseBlock(index int64) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 

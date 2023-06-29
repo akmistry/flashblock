@@ -117,7 +117,54 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 	if f.freeBlocks.Len() == 0 {
 		return nil
 	}
-	return f.freeBlocks.Remove(f.freeBlocks.Front()).(*eraseBlockInfo)
+	ebi := f.freeBlocks.Remove(f.freeBlocks.Front()).(*eraseBlockInfo)
+	if f.freeBlocks.Len() > 0 {
+		return ebi
+	}
+	log.Print("Allocated final free erase block, running GC")
+
+	var gcEbi *eraseBlockInfo
+	lastContentLen := 0
+	for _, b := range f.eraseBlocks {
+		if b == ebi {
+			continue
+		}
+		if gcEbi == nil || len(b.contents) < lastContentLen {
+			gcEbi = b
+			lastContentLen = len(b.contents)
+		}
+	}
+
+	log.Printf("GCing erase block %d, utilisation %d/%d",
+		gcEbi.index, lastContentLen, f.chip.EraseBlockSize()/f.blockSize)
+
+	buf := make([]byte, f.blockSize)
+	eraseBlockSize := f.chip.EraseBlockSize()
+	for block, offset := range gcEbi.contents {
+		_, err := f.chip.ReadAtBlock(gcEbi.index, buf, int64(offset))
+		if err != nil {
+			panic(err)
+		}
+
+		writeOffset := ebi.nextWrite
+		_, err = f.chip.WriteAtBlock(ebi.index, buf, writeOffset)
+		if err != nil {
+			panic(err)
+		}
+
+		writeBlockIndex :=
+			((ebi.index * eraseBlockSize) + writeOffset) / f.blockSize
+		f.blockMap[block] = writeBlockIndex
+
+		ebi.nextWrite += f.blockSize
+	}
+
+	gcEbi.contents = make(map[int64]int)
+	gcEbi.nextWrite = 0
+	f.chip.EraseBlock(gcEbi.index)
+	f.freeBlocks.PushBack(gcEbi)
+
+	return ebi
 }
 
 func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
@@ -125,8 +172,8 @@ func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 	if f.currentWriteEraseBlock >= 0 {
 		eb = f.eraseBlocks[int(f.currentWriteEraseBlock)]
 		if eb.nextWrite == f.chip.EraseBlockSize() {
-			log.Printf("Filled erase block %d: utilisation %d/%d",
-				eb.index, len(eb.contents), f.chip.EraseBlockSize()/f.blockSize)
+			//log.Printf("Filled erase block %d: utilisation %d/%d",
+			//	eb.index, len(eb.contents), f.chip.EraseBlockSize()/f.blockSize)
 			eb = nil
 		} else if eb.nextWrite > f.chip.EraseBlockSize() {
 			log.Fatalf("eraseBlock.nextWrite %d > eraseBlockSize %d",

@@ -5,7 +5,7 @@ import (
 )
 
 type Chip struct {
-	blockSize, eraseBlockSize, size int64
+	eraseBlockSize, size int64
 
 	backing ReadWriterAt
 	blocks  []*EraseBlock
@@ -13,17 +13,14 @@ type Chip struct {
 	lock sync.Mutex
 }
 
-func NewChip(blockSize, eraseBlockSize, size int64, backing ReadWriterAt) *Chip {
-	if eraseBlockSize%blockSize != 0 {
-		panic("eraseBlockSize MUST be a multiple of blockSize")
-	} else if size%eraseBlockSize != 0 {
+func NewChip(eraseBlockSize, size int64, backing ReadWriterAt) *Chip {
+	if size%eraseBlockSize != 0 {
 		panic("size MUST be a multiple of eraseBlockSize")
 	}
 
 	numBlocks := int(size / eraseBlockSize)
 
 	c := &Chip{
-		blockSize:      blockSize,
 		eraseBlockSize: eraseBlockSize,
 		size:           size,
 		backing:        backing,
@@ -33,10 +30,18 @@ func NewChip(blockSize, eraseBlockSize, size int64, backing ReadWriterAt) *Chip 
 	for i := range c.blocks {
 		offset := int64(i) * eraseBlockSize
 		c.blocks[i] = NewEraseBlock(
-			blockSize, eraseBlockSize, NewOffsetReadWriterAt(backing, offset))
+			eraseBlockSize, NewOffsetReadWriterAt(backing, offset))
 	}
 
 	return c
+}
+
+func (c *Chip) Size() int64 {
+	return c.size
+}
+
+func (c *Chip) EraseBlockSize() int64 {
+	return c.eraseBlockSize
 }
 
 func (c *Chip) EraseBlockCount() int {

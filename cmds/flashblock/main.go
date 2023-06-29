@@ -4,8 +4,13 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	_ "github.com/akmistry/go-nbd"
+	"github.com/akmistry/go-nbd"
+
+	"github.com/akmistry/flashblock"
+	"github.com/akmistry/flashblock/simpleftl"
 )
 
 const (
@@ -21,9 +26,9 @@ const (
 var (
 	deviceFlag = flag.String(
 		"device", "/dev/nbd0", "Path to /deb/nbdX device.")
-	deviceSizeFlag = flag.Uint64(
+	deviceSizeFlag = flag.Int64(
 		"device-size", defaultDeviceSize, "Block device size (bytes)")
-	eraseBlockSizeFlag = flag.Uint64(
+	eraseBlockSizeFlag = flag.Int64(
 		"erase-block-size", defaultEraseBlockSize, "Erase block size (bytes)")
 )
 
@@ -41,4 +46,23 @@ func main() {
 	}
 	defer f.Close()
 
+	chip := flashblock.NewChip(*eraseBlockSizeFlag, *deviceSizeFlag, f)
+	ftl := simpleftl.New(blockSize, chip)
+
+	opts := nbd.BlockDeviceOptions{
+		BlockSize: blockSize,
+	}
+	nbdDevice, err := nbd.NewServer(*deviceFlag, ftl, *deviceSizeFlag, opts)
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM)
+	go func() {
+		<-ch
+		nbdDevice.Disconnect()
+	}()
+
+	log.Println("nbd: ", nbdDevice.Run())
 }

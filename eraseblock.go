@@ -1,19 +1,22 @@
 package flashblock
 
 type EraseBlock struct {
-	blockSize, size int64
+	size int64
 
 	backing ReadWriterAt
 }
 
-func NewEraseBlock(blockSize, size int64, backing ReadWriterAt) *EraseBlock {
+func NewEraseBlock(size int64, backing ReadWriterAt) *EraseBlock {
 	b := &EraseBlock{
-		blockSize: blockSize,
-		size:      size,
-		backing:   backing,
+		size:    size,
+		backing: backing,
 	}
 
 	return b
+}
+
+func (b *EraseBlock) Size() int64 {
+	return b.size
 }
 
 func (b *EraseBlock) Erase() error {

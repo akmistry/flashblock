@@ -82,9 +82,9 @@ func (f *Ftl) readBlock(p []byte, block int64) error {
 		return nil
 	}
 	eraseBlockSize := f.chip.EraseBlockSize()
-	eraseBlockIndex := blockIndex / eraseBlockSize
+	eraseBlockIndex := blockIndex / (eraseBlockSize / f.blockSize)
 	eraseBlockOffset :=
-		(blockIndex - (eraseBlockIndex * eraseBlockSize)) * f.blockSize
+		(blockIndex * f.blockSize) - (eraseBlockIndex * eraseBlockSize)
 	_, err := f.chip.ReadAtBlock(eraseBlockIndex, p, eraseBlockOffset)
 	return err
 }

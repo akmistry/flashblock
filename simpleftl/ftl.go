@@ -108,6 +108,8 @@ func (f *Ftl) dumpHist() {
 
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
+		f.lock.Lock()
+
 		log.Printf("Used erase blocks: %d/%d",
 			totalEraseBlocks-f.freeBlocks.Len(), totalEraseBlocks)
 
@@ -116,6 +118,8 @@ func (f *Ftl) dumpHist() {
 
 		h = f.generateUtilHist()
 		log.Printf("Utilisation histogram: %v", h)
+
+		f.lock.Unlock()
 	}
 }
 
@@ -149,6 +153,10 @@ func (f *Ftl) eraseBlockIndexOffset(block int64) (i int64, off int64) {
 	return
 }
 
+func (f *Ftl) eraseBlockOffsetToBlockIndex(eb, off int64) int64 {
+	return eb*f.blocksPerEraseBlock + (off / f.blockSize)
+}
+
 func (f *Ftl) getCurrentBlock(block int64) (*eraseBlockInfo, int64) {
 	blockIndex := f.blockMap[block]
 	if blockIndex < 0 {
@@ -160,12 +168,13 @@ func (f *Ftl) getCurrentBlock(block int64) (*eraseBlockInfo, int64) {
 
 func (f *Ftl) readBlock(p []byte, block int64) error {
 	if len(p) != int(f.blockSize) {
-		log.Printf("ERROR len(p) %d != blockSize", len(p))
+		log.Printf("ERROR read len(p) %d != blockSize", len(p))
 	}
+
 	ebi, off := f.getCurrentBlock(block)
 	if ebi == nil {
 		// Unallocated block, fill zeros
-		for i := 0; i < int(f.blockSize); i++ {
+		for i := range p {
 			p[i] = 0
 		}
 		return nil
@@ -173,35 +182,6 @@ func (f *Ftl) readBlock(p []byte, block int64) error {
 
 	_, err := f.chip.ReadAtBlock(ebi.index, p, off)
 	return err
-}
-
-func (f *Ftl) ReadAt(p []byte, off int64) (int, error) {
-	if off%f.blockSize != 0 {
-		return 0, errUnalignedOffset
-	} else if int64(len(p))%f.blockSize != 0 {
-		return 0, errUnalignedLength
-	}
-
-	f.lock.Lock()
-	defer f.lock.Unlock()
-
-	n := 0
-	for len(p) > 0 {
-		block := off / f.blockSize
-		err := f.readBlock(p[:f.blockSize], block)
-		if err != nil {
-			return n, err
-		}
-		p = p[f.blockSize:]
-		n += int(f.blockSize)
-		off += f.blockSize
-	}
-
-	return n, nil
-}
-
-func (f *Ftl) eraseBlockOffsetToBlockIndex(eb, off int64) int64 {
-	return eb*f.blocksPerEraseBlock + (off / f.blockSize)
 }
 
 func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
@@ -235,17 +215,10 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 			panic(err)
 		}
 
-		writeOffset := ebi.nextWrite
-		_, err = f.chip.WriteAtBlock(ebi.index, buf, writeOffset)
+		err = f.writeBlock(buf, block, ebi.index)
 		if err != nil {
 			panic(err)
 		}
-		ebi.contents[block] = int(writeOffset)
-
-		writeBlockIndex := f.eraseBlockOffsetToBlockIndex(ebi.index, writeOffset)
-		f.blockMap[block] = writeBlockIndex
-
-		ebi.nextWrite += f.blockSize
 	}
 
 	gcEbi.erase()
@@ -301,6 +274,48 @@ func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
 		ebi.index, f.freeBlocks.Len())
 }
 
+func (f *Ftl) writeBlock(p []byte, block, eraseBlock int64) error {
+	if len(p) != int(f.blockSize) {
+		log.Printf("ERROR write len(p) %d != blockSize", len(p))
+	}
+
+	ebi := f.eraseBlocks[eraseBlock]
+	writeOffset := ebi.nextWrite
+	_, err := f.chip.WriteAtBlock(eraseBlock, p[:f.blockSize], writeOffset)
+	if err != nil {
+		return err
+	}
+	ebi.contents[block] = int(writeOffset)
+	ebi.nextWrite += f.blockSize
+
+	writeBlockIndex := f.eraseBlockOffsetToBlockIndex(eraseBlock, writeOffset)
+	f.blockMap[block] = writeBlockIndex
+
+	return nil
+}
+
+func (f *Ftl) ReadAt(p []byte, off int64) (int, error) {
+	if off%f.blockSize != 0 {
+		return 0, errUnalignedOffset
+	} else if int64(len(p))%f.blockSize != 0 {
+		return 0, errUnalignedLength
+	}
+
+	f.lock.Lock()
+	defer f.lock.Unlock()
+
+	n := 0
+	for ; n < len(p); n += int(f.blockSize) {
+		block := (off + int64(n)) / f.blockSize
+		err := f.readBlock(p[n:n+int(f.blockSize)], block)
+		if err != nil {
+			return n, err
+		}
+	}
+
+	return n, nil
+}
+
 func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 	if off%f.blockSize != 0 {
 		return 0, errUnalignedOffset
@@ -312,31 +327,19 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 	defer f.lock.Unlock()
 
 	n := 0
-	for len(p) > 0 {
-		block := off / f.blockSize
+	for ; n < len(p); n += int(f.blockSize) {
+		block := (off + int64(n)) / f.blockSize
 		ebi, _ := f.getCurrentBlock(block)
 		if ebi != nil {
 			delete(ebi.contents, block)
 			f.freeEraseBlockIfEmpty(ebi)
-			//log.Printf("Relocating block %d from erase block %d, new erase block contents: %d",
-			//	block, ebi.index, len(ebi.contents))
 		}
 		ebi = f.fetchWriteBlock()
 
-		writeOffset := ebi.nextWrite
-		ebi.nextWrite += f.blockSize
-		_, err := f.chip.WriteAtBlock(ebi.index, p[:f.blockSize], writeOffset)
+		err := f.writeBlock(p[n:n+int(f.blockSize)], block, ebi.index)
 		if err != nil {
 			return n, err
 		}
-		ebi.contents[block] = int(writeOffset)
-
-		writeBlockIndex := f.eraseBlockOffsetToBlockIndex(ebi.index, writeOffset)
-		f.blockMap[block] = writeBlockIndex
-
-		p = p[f.blockSize:]
-		n += int(f.blockSize)
-		off += f.blockSize
 	}
 
 	return n, nil

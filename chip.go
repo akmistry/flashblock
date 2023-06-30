@@ -44,8 +44,8 @@ func (c *Chip) EraseBlockSize() int64 {
 	return c.eraseBlockSize
 }
 
-func (c *Chip) EraseBlockCount() int {
-	return len(c.blocks)
+func (c *Chip) EraseBlockCount() int64 {
+	return int64(len(c.blocks))
 }
 
 func (c *Chip) EraseBlock(index int64) error {

@@ -104,8 +104,13 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 }
 
 func (f *Ftl) dumpHist() {
+	totalEraseBlocks := len(f.eraseBlocks)
+
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
+		log.Printf("Used erase blocks: %d/%d",
+			totalEraseBlocks-f.freeBlocks.Len(), totalEraseBlocks)
+
 		h := f.generateEraseCountHist()
 		log.Printf("Erase count histogram: %v", h)
 

@@ -16,11 +16,23 @@ var (
 )
 
 type eraseBlockInfo struct {
+	f *Ftl
+
 	index int64
 	// TODO: This could be a simple vector
 	contents map[int64]int
 
 	nextWrite int64
+}
+
+func (i *eraseBlockInfo) full() bool {
+	return i.nextWrite >= i.f.blockSize
+}
+
+func (i *eraseBlockInfo) erase() {
+	i.contents = make(map[int64]int)
+	i.nextWrite = 0
+	i.f.chip.EraseBlock(i.index)
 }
 
 type Ftl struct {
@@ -31,7 +43,7 @@ type Ftl struct {
 	blockMap    []int64
 	eraseBlocks []*eraseBlockInfo
 
-	currentWriteEraseBlock int64
+	currentWriteEraseBlock *eraseBlockInfo
 	freeBlocks             list.List
 
 	lock sync.Mutex
@@ -48,18 +60,18 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 
 	numBlocks := int(chip.Size() / blockSize)
 	f := &Ftl{
-		blockSize:              blockSize,
-		numBlocks:              numBlocks,
-		chip:                   chip,
-		blockMap:               make([]int64, numBlocks),
-		eraseBlocks:            make([]*eraseBlockInfo, chip.EraseBlockCount()),
-		currentWriteEraseBlock: -1,
+		blockSize:   blockSize,
+		numBlocks:   numBlocks,
+		chip:        chip,
+		blockMap:    make([]int64, numBlocks),
+		eraseBlocks: make([]*eraseBlockInfo, chip.EraseBlockCount()),
 	}
 	for i := range f.blockMap {
 		f.blockMap[i] = -1
 	}
 	for i := range f.eraseBlocks {
 		ebi := &eraseBlockInfo{
+			f:        f,
 			index:    int64(i),
 			contents: make(map[int64]int),
 		}
@@ -151,6 +163,7 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 		if err != nil {
 			panic(err)
 		}
+		ebi.contents[block] = int(writeOffset)
 
 		writeBlockIndex :=
 			((ebi.index * eraseBlockSize) + writeOffset) / f.blockSize
@@ -159,22 +172,20 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 		ebi.nextWrite += f.blockSize
 	}
 
-	gcEbi.contents = make(map[int64]int)
-	gcEbi.nextWrite = 0
-	f.chip.EraseBlock(gcEbi.index)
+	gcEbi.erase()
 	f.freeBlocks.PushBack(gcEbi)
 
 	return ebi
 }
 
 func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
-	var eb *eraseBlockInfo
-	if f.currentWriteEraseBlock >= 0 {
-		eb = f.eraseBlocks[int(f.currentWriteEraseBlock)]
+	eb := f.currentWriteEraseBlock
+	if eb != nil {
 		if eb.nextWrite == f.chip.EraseBlockSize() {
 			//log.Printf("Filled erase block %d: utilisation %d/%d",
 			//	eb.index, len(eb.contents), f.chip.EraseBlockSize()/f.blockSize)
 			eb = nil
+			f.currentWriteEraseBlock = nil
 		} else if eb.nextWrite > f.chip.EraseBlockSize() {
 			log.Fatalf("eraseBlock.nextWrite %d > eraseBlockSize %d",
 				eb.nextWrite, f.chip.EraseBlockSize())
@@ -184,9 +195,9 @@ func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 	if eb == nil {
 		eb = f.fetchEmptyEraseBlock()
 		if eb == nil {
-			panic("No free erase blocks. TODO: Implement GC")
+			panic("No free erase blocks")
 		}
-		f.currentWriteEraseBlock = eb.index
+		f.currentWriteEraseBlock = eb
 	}
 
 	return eb
@@ -197,7 +208,8 @@ func (f *Ftl) getCurrentBlock(block int64) *eraseBlockInfo {
 	if blockIndex < 0 {
 		return nil
 	}
-	return f.eraseBlocks[blockIndex/f.chip.EraseBlockSize()]
+	eraseBlockIndex := (blockIndex * f.blockSize) / f.chip.EraseBlockSize()
+	return f.eraseBlocks[eraseBlockIndex]
 }
 
 func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
@@ -205,9 +217,19 @@ func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
 		return
 	}
 
-	log.Println("==== Erase block %d empty, erasing and freeing", ebi.index)
-	ebi.nextWrite = 0
-	f.chip.EraseBlock(ebi.index)
+	if ebi == f.currentWriteEraseBlock {
+		log.Printf("Avoid erasing current erase block %d with usage %d",
+			ebi.index, len(ebi.contents))
+		return
+	}
+	if !ebi.full() {
+		log.Printf("Avoid erasing non-full erase block %d with usage %d",
+			ebi.index, len(ebi.contents))
+		return
+	}
+
+	log.Printf("==== Erase block %d empty, erasing and freeing", ebi.index)
+	ebi.erase()
 	f.freeBlocks.PushBack(ebi)
 }
 
@@ -228,6 +250,8 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 		if ebi != nil {
 			delete(ebi.contents, block)
 			f.freeEraseBlockIfEmpty(ebi)
+			//log.Printf("Relocating block %d from erase block %d, new erase block contents: %d",
+			//	block, ebi.index, len(ebi.contents))
 		}
 		ebi = f.fetchWriteBlock()
 

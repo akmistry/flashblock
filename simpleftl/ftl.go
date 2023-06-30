@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/bits"
 	"sync"
+	"time"
 
 	"github.com/akmistry/flashblock"
 )
@@ -23,6 +24,8 @@ type eraseBlockInfo struct {
 	contents map[int64]int
 
 	nextWrite int64
+
+	eraseCount int
 }
 
 func (i *eraseBlockInfo) full() bool {
@@ -32,6 +35,7 @@ func (i *eraseBlockInfo) full() bool {
 func (i *eraseBlockInfo) erase() {
 	i.contents = make(map[int64]int)
 	i.nextWrite = 0
+	i.eraseCount++
 	i.f.chip.EraseBlock(i.index)
 }
 
@@ -80,7 +84,30 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 	}
 	log.Printf("block map entries: %d, erase blocks: %d",
 		len(f.blockMap), len(f.eraseBlocks))
+
+	go f.dumpHist()
+
 	return f
+}
+
+func (f *Ftl) dumpHist() {
+	ticker := time.NewTicker(5 * time.Second)
+	for range ticker.C {
+		h := f.generateEraseCountHist()
+		log.Printf("Histogram: %v", h)
+	}
+}
+
+func (f *Ftl) generateEraseCountHist() []int {
+	var hist []int
+	for _, b := range f.eraseBlocks {
+		if b.eraseCount >= len(hist) {
+			hist = append(hist, make([]int, b.eraseCount-len(hist)+1)...)
+		}
+
+		hist[b.eraseCount]++
+	}
+	return hist
 }
 
 func (f *Ftl) readBlock(p []byte, block int64) error {
@@ -228,9 +255,10 @@ func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
 		return
 	}
 
-	log.Printf("==== Erase block %d empty, erasing and freeing", ebi.index)
 	ebi.erase()
 	f.freeBlocks.PushBack(ebi)
+	log.Printf("==== Erase block %d empty, erasing and freeing. Free blocks %d",
+		ebi.index, f.freeBlocks.Len())
 }
 
 func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {

@@ -17,12 +17,13 @@ var (
 )
 
 type eraseBlockInfo struct {
-	f *Ftl
-
+	f     *Ftl
 	index int64
-	// TODO: This could be a simple vector
-	contents map[int64]int
 
+	// Vector of (block, offset) pairs. A negative offset indicates
+	// the block has been removed.
+	// TODO: Store this in the erase block.
+	blockMap     []int64
 	activeBlocks int
 
 	nextWrite int64
@@ -35,13 +36,35 @@ func (i *eraseBlockInfo) full() bool {
 }
 
 func (i *eraseBlockInfo) erase() {
-	i.contents = make(map[int64]int)
 	i.nextWrite = 0
 	i.eraseCount++
 
+	i.blockMap = nil
 	i.activeBlocks = 0
 
 	i.f.chip.EraseBlock(i.index)
+}
+
+func (i *eraseBlockInfo) appendBlock(block, offset int64) {
+	if offset >= i.f.chip.EraseBlockSize() {
+		log.Printf("ERROR: offset %d >= block size %d", offset, i.f.chip.EraseBlockSize())
+	}
+
+	i.blockMap = append(i.blockMap, block, offset)
+}
+
+func (i *eraseBlockInfo) removeBlock(block int64) {
+	if int64(len(i.blockMap)) >= (i.f.blocksPerEraseBlock * 4) {
+		log.Printf("ERROR: blockmap entries %d > expected %d",
+			len(i.blockMap), (i.f.blocksPerEraseBlock * 4))
+	}
+
+	i.blockMap = append(i.blockMap, block, -1)
+	i.activeBlocks--
+
+	if i.activeBlocks < 0 {
+		log.Printf("WARN invalid activeBlocks: %d", i.activeBlocks)
+	}
 }
 
 type Ftl struct {
@@ -93,9 +116,8 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 	}
 	for i := range f.eraseBlocks {
 		ebi := &eraseBlockInfo{
-			f:        f,
-			index:    int64(i),
-			contents: make(map[int64]int),
+			f:     f,
+			index: int64(i),
 		}
 		f.eraseBlocks[i] = ebi
 		f.freeBlocks.PushBack(ebi)
@@ -214,7 +236,17 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 		gcEbi.index, lastContentLen, f.blocksPerEraseBlock)
 
 	buf := make([]byte, f.blockSize)
-	for block, offset := range gcEbi.contents {
+	liveBlocks := make(map[int64]int64)
+	for i := 0; i < len(gcEbi.blockMap); i += 2 {
+		block := gcEbi.blockMap[i]
+		offset := gcEbi.blockMap[i+1]
+		if offset >= 0 {
+			liveBlocks[block] = offset
+		} else {
+			delete(liveBlocks, block)
+		}
+	}
+	for block, offset := range liveBlocks {
 		_, err := f.chip.ReadAtBlock(gcEbi.index, buf, int64(offset))
 		if err != nil {
 			panic(err)
@@ -290,7 +322,7 @@ func (f *Ftl) writeBlock(p []byte, block, eraseBlock int64) error {
 	if err != nil {
 		return err
 	}
-	ebi.contents[block] = int(writeOffset)
+	ebi.appendBlock(block, writeOffset)
 	ebi.activeBlocks++
 	ebi.nextWrite += f.blockSize
 
@@ -337,11 +369,7 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 		block := (off + int64(n)) / f.blockSize
 		ebi, _ := f.getCurrentBlock(block)
 		if ebi != nil {
-			delete(ebi.contents, block)
-			ebi.activeBlocks--
-			if ebi.activeBlocks < 0 {
-				log.Printf("WARN invalid activeBlocks: %d", ebi.activeBlocks)
-			}
+			ebi.removeBlock(block)
 			f.freeEraseBlockIfEmpty(ebi)
 		}
 		ebi = f.fetchWriteBlock()
@@ -371,11 +399,7 @@ func (f *Ftl) Trim(off int64, length uint32) error {
 		block := off / f.blockSize
 		ebi, _ := f.getCurrentBlock(block)
 		if ebi != nil {
-			delete(ebi.contents, block)
-			ebi.activeBlocks--
-			if ebi.activeBlocks < 0 {
-				log.Printf("WARN invalid activeBlocks: %d", ebi.activeBlocks)
-			}
+			ebi.removeBlock(block)
 			f.freeEraseBlockIfEmpty(ebi)
 		}
 		f.blockMap[block] = -1

@@ -52,7 +52,7 @@ func main() {
 	opts := nbd.BlockDeviceOptions{
 		BlockSize: blockSize,
 	}
-	nbdDevice, err := nbd.NewServer(*deviceFlag, ftl, *deviceSizeFlag, opts)
+	nbdDevice, err := nbd.NewServer(*deviceFlag, ftl, ftl.Size(), opts)
 	if err != nil {
 		log.Panicln(err)
 	}

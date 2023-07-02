@@ -16,6 +16,10 @@ var (
 	errUnalignedLength = errors.New("simpleftl: unaligned length")
 )
 
+const (
+	blockOverhead = 4 * 8
+)
+
 type eraseBlockInfo struct {
 	f     *Ftl
 	index int64
@@ -32,7 +36,7 @@ type eraseBlockInfo struct {
 }
 
 func (i *eraseBlockInfo) full() bool {
-	return i.nextWrite >= i.f.chip.EraseBlockSize()
+	return i.nextWrite >= i.f.eraseBlockCapacity
 }
 
 func (i *eraseBlockInfo) erase() {
@@ -46,11 +50,12 @@ func (i *eraseBlockInfo) erase() {
 }
 
 func (i *eraseBlockInfo) appendBlock(block, offset int64) {
-	if offset >= i.f.chip.EraseBlockSize() {
-		log.Printf("ERROR: offset %d >= block size %d", offset, i.f.chip.EraseBlockSize())
+	if offset >= i.f.eraseBlockCapacity {
+		log.Printf("ERROR: offset %d >= block size %d", offset, i.f.eraseBlockCapacity)
 	}
 
 	i.blockMap = append(i.blockMap, block, offset)
+	i.activeBlocks++
 }
 
 func (i *eraseBlockInfo) removeBlock(block int64) {
@@ -78,6 +83,8 @@ type Ftl struct {
 	// Number of blocks per "erase block". Not necessarily
 	// eraseBlockSize/blockSize.
 	blocksPerEraseBlock int64
+	// Number of bytes a "erase block" can hold. May be less than eraseBlockSize.
+	eraseBlockCapacity int64
 
 	chip *flashblock.Chip
 
@@ -100,12 +107,17 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 	}
 
 	blocksPerEraseBlock := chip.EraseBlockSize() / blockSize
+	eraseBlockOverhead := blocksPerEraseBlock * blockOverhead
+	overheadBlocks := (eraseBlockOverhead + blockSize - 1) / blockSize
+	blocksPerEraseBlock -= overheadBlocks
+
 	numBlocks := blocksPerEraseBlock * chip.EraseBlockCount()
 	f := &Ftl{
 		blockSize:           blockSize,
 		numBlocks:           numBlocks,
 		numEraseBlocks:      chip.EraseBlockCount(),
 		blocksPerEraseBlock: blocksPerEraseBlock,
+		eraseBlockCapacity:  blocksPerEraseBlock * blockSize,
 
 		chip:        chip,
 		blockMap:    make([]int64, numBlocks),
@@ -122,12 +134,16 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 		f.eraseBlocks[i] = ebi
 		f.freeBlocks.PushBack(ebi)
 	}
-	log.Printf("block map entries: %d, erase blocks: %d",
-		len(f.blockMap), len(f.eraseBlocks))
+	log.Printf("block map entries: %d, erase blocks: %d, blocksPerEraseBlock: %d",
+		len(f.blockMap), len(f.eraseBlocks), f.blocksPerEraseBlock)
 
 	go f.dumpHist()
 
 	return f
+}
+
+func (f *Ftl) Size() int64 {
+	return f.blockSize * int64(len(f.blockMap))
 }
 
 func (f *Ftl) dumpHist() {
@@ -267,9 +283,9 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 	eb := f.currentWriteEraseBlock
 	if eb != nil && eb.full() {
-		if eb.nextWrite > f.chip.EraseBlockSize() {
-			log.Fatalf("eraseBlock.nextWrite %d > eraseBlockSize %d",
-				eb.nextWrite, f.chip.EraseBlockSize())
+		if eb.nextWrite > f.eraseBlockCapacity {
+			log.Fatalf("eraseBlock.nextWrite %d > eraseBlockCapacity %d",
+				eb.nextWrite, f.eraseBlockCapacity)
 		}
 
 		//log.Printf("Filled erase block %d: utilisation %d/%d",
@@ -323,7 +339,6 @@ func (f *Ftl) writeBlock(p []byte, block, eraseBlock int64) error {
 		return err
 	}
 	ebi.appendBlock(block, writeOffset)
-	ebi.activeBlocks++
 	ebi.nextWrite += f.blockSize
 
 	writeBlockIndex := f.eraseBlockOffsetToBlockIndex(eraseBlock, writeOffset)

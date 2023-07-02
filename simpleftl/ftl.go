@@ -403,7 +403,9 @@ func (f *Ftl) Trim(off int64, length uint32) error {
 			f.freeEraseBlockIfEmpty(ebi)
 		}
 		f.blockMap[block] = -1
+
 		length -= uint32(f.blockSize)
+		off += f.blockSize
 	}
 
 	return nil

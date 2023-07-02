@@ -23,6 +23,8 @@ type eraseBlockInfo struct {
 	// TODO: This could be a simple vector
 	contents map[int64]int
 
+	activeBlocks int
+
 	nextWrite int64
 
 	eraseCount int
@@ -36,6 +38,9 @@ func (i *eraseBlockInfo) erase() {
 	i.contents = make(map[int64]int)
 	i.nextWrite = 0
 	i.eraseCount++
+
+	i.activeBlocks = 0
+
 	i.f.chip.EraseBlock(i.index)
 }
 
@@ -138,11 +143,11 @@ func (f *Ftl) generateEraseCountHist() []int {
 func (f *Ftl) generateUtilHist() []int {
 	hist := make([]int, 17)
 	for _, b := range f.eraseBlocks {
-		if len(b.contents) == 0 {
+		if b.activeBlocks == 0 {
 			continue
 		}
 
-		hist[len(b.contents)/16]++
+		hist[b.activeBlocks/16]++
 	}
 	return hist
 }
@@ -199,9 +204,9 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 		if b == ebi {
 			continue
 		}
-		if gcEbi == nil || len(b.contents) < lastContentLen {
+		if gcEbi == nil || b.activeBlocks < lastContentLen {
 			gcEbi = b
-			lastContentLen = len(b.contents)
+			lastContentLen = b.activeBlocks
 		}
 	}
 
@@ -253,18 +258,18 @@ func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 }
 
 func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
-	if len(ebi.contents) > 0 {
+	if ebi.activeBlocks > 0 {
 		return
 	}
 
 	if ebi == f.currentWriteEraseBlock {
 		log.Printf("Avoid erasing current erase block %d with usage %d",
-			ebi.index, len(ebi.contents))
+			ebi.index, ebi.activeBlocks)
 		return
 	}
 	if !ebi.full() {
 		log.Printf("Avoid erasing non-full erase block %d with usage %d",
-			ebi.index, len(ebi.contents))
+			ebi.index, ebi.activeBlocks)
 		return
 	}
 
@@ -286,6 +291,7 @@ func (f *Ftl) writeBlock(p []byte, block, eraseBlock int64) error {
 		return err
 	}
 	ebi.contents[block] = int(writeOffset)
+	ebi.activeBlocks++
 	ebi.nextWrite += f.blockSize
 
 	writeBlockIndex := f.eraseBlockOffsetToBlockIndex(eraseBlock, writeOffset)
@@ -332,6 +338,10 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 		ebi, _ := f.getCurrentBlock(block)
 		if ebi != nil {
 			delete(ebi.contents, block)
+			ebi.activeBlocks--
+			if ebi.activeBlocks < 0 {
+				log.Printf("WARN invalid activeBlocks: %d", ebi.activeBlocks)
+			}
 			f.freeEraseBlockIfEmpty(ebi)
 		}
 		ebi = f.fetchWriteBlock()
@@ -362,6 +372,10 @@ func (f *Ftl) Trim(off int64, length uint32) error {
 		ebi, _ := f.getCurrentBlock(block)
 		if ebi != nil {
 			delete(ebi.contents, block)
+			ebi.activeBlocks--
+			if ebi.activeBlocks < 0 {
+				log.Printf("WARN invalid activeBlocks: %d", ebi.activeBlocks)
+			}
 			f.freeEraseBlockIfEmpty(ebi)
 		}
 		f.blockMap[block] = -1

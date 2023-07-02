@@ -24,11 +24,11 @@ type eraseBlockInfo struct {
 	f     *Ftl
 	index int64
 
-	// Vector of (block, offset) pairs. A negative offset indicates
-	// the block has been removed.
+	// Vector of (block, offset+1) pairs. A negative offset indicates
+	// the block has been removed. A zero offset indicates an unused entry.
 	// TODO: Store this in the erase block.
-	blockMap     []int64
-	activeBlocks int
+	activeBlockMap []int64
+	activeBlocks   int
 
 	nextWrite int64
 
@@ -43,7 +43,7 @@ func (i *eraseBlockInfo) erase() {
 	i.nextWrite = 0
 	i.eraseCount++
 
-	i.blockMap = nil
+	i.activeBlockMap = nil
 	i.activeBlocks = 0
 
 	i.f.chip.EraseBlock(i.index)
@@ -54,21 +54,21 @@ func (i *eraseBlockInfo) appendBlock(block, offset int64) {
 		log.Printf("ERROR: offset %d >= block size %d", offset, i.f.eraseBlockCapacity)
 	}
 
-	i.blockMap = append(i.blockMap, block, offset)
+	i.activeBlockMap = append(i.activeBlockMap, block, offset+1)
 	i.activeBlocks++
 }
 
 func (i *eraseBlockInfo) removeBlock(block int64) {
-	if int64(len(i.blockMap)) >= (i.f.blocksPerEraseBlock * 4) {
+	if int64(len(i.activeBlockMap)) >= (i.f.blocksPerEraseBlock * 4) {
 		log.Printf("ERROR: blockmap entries %d > expected %d",
-			len(i.blockMap), (i.f.blocksPerEraseBlock * 4))
+			len(i.activeBlockMap), (i.f.blocksPerEraseBlock * 4))
 	}
 
-	i.blockMap = append(i.blockMap, block, -1)
+	i.activeBlockMap = append(i.activeBlockMap, block, -1)
 	i.activeBlocks--
 
 	if i.activeBlocks < 0 {
-		log.Printf("WARN invalid activeBlocks: %d", i.activeBlocks)
+		log.Printf("ERROR: invalid activeBlocks: %d", i.activeBlocks)
 	}
 }
 
@@ -211,7 +211,7 @@ func (f *Ftl) getCurrentBlock(block int64) (*eraseBlockInfo, int64) {
 
 func (f *Ftl) readBlock(p []byte, block int64) error {
 	if len(p) != int(f.blockSize) {
-		log.Printf("ERROR read len(p) %d != blockSize", len(p))
+		log.Printf("ERROR: read len(p) %d != blockSize", len(p))
 	}
 
 	ebi, off := f.getCurrentBlock(block)
@@ -253,11 +253,15 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 
 	buf := make([]byte, f.blockSize)
 	liveBlocks := make(map[int64]int64)
-	for i := 0; i < len(gcEbi.blockMap); i += 2 {
-		block := gcEbi.blockMap[i]
-		offset := gcEbi.blockMap[i+1]
-		if offset >= 0 {
-			liveBlocks[block] = offset
+	for i := 0; i < len(gcEbi.activeBlockMap); i += 2 {
+		block := gcEbi.activeBlockMap[i]
+		offset := gcEbi.activeBlockMap[i+1]
+		if offset == 0 {
+			// End of entries
+			break
+		}
+		if offset > 0 {
+			liveBlocks[block] = offset - 1
 		} else {
 			delete(liveBlocks, block)
 		}
@@ -284,7 +288,7 @@ func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 	eb := f.currentWriteEraseBlock
 	if eb != nil && eb.full() {
 		if eb.nextWrite > f.eraseBlockCapacity {
-			log.Fatalf("eraseBlock.nextWrite %d > eraseBlockCapacity %d",
+			log.Printf("ERROR: eraseBlock.nextWrite %d > eraseBlockCapacity %d",
 				eb.nextWrite, f.eraseBlockCapacity)
 		}
 
@@ -323,13 +327,13 @@ func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
 
 	ebi.erase()
 	f.freeBlocks.PushBack(ebi)
-	log.Printf("==== Erase block %d empty, erasing and freeing. Free blocks %d",
-		ebi.index, f.freeBlocks.Len())
+	//log.Printf("==== Erase block %d empty, erasing and freeing. Free blocks %d",
+	//	ebi.index, f.freeBlocks.Len())
 }
 
 func (f *Ftl) writeBlock(p []byte, block, eraseBlock int64) error {
 	if len(p) != int(f.blockSize) {
-		log.Printf("ERROR write len(p) %d != blockSize", len(p))
+		log.Printf("ERROR: write len(p) %d != blockSize", len(p))
 	}
 
 	ebi := f.eraseBlocks[eraseBlock]

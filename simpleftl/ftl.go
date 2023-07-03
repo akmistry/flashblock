@@ -2,6 +2,7 @@ package simpleftl
 
 import (
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"log"
 	"math/bits"
@@ -14,6 +15,8 @@ import (
 var (
 	errUnalignedOffset = errors.New("simpleftl: unaligned offset")
 	errUnalignedLength = errors.New("simpleftl: unaligned length")
+
+	le = binary.LittleEndian
 )
 
 const (
@@ -26,9 +29,8 @@ type eraseBlockInfo struct {
 
 	// Vector of (block, offset+1) pairs. A negative offset indicates
 	// the block has been removed. A zero offset indicates an unused entry.
-	// TODO: Store this in the erase block.
-	activeBlockMap []int64
-	activeBlocks   int
+	activeBlocks       int
+	activeBlocksOffset int64
 
 	nextWrite int64
 
@@ -43,8 +45,8 @@ func (i *eraseBlockInfo) erase() {
 	i.nextWrite = 0
 	i.eraseCount++
 
-	i.activeBlockMap = nil
 	i.activeBlocks = 0
+	i.activeBlocksOffset = 0
 
 	i.f.chip.EraseBlock(i.index)
 }
@@ -54,22 +56,58 @@ func (i *eraseBlockInfo) appendBlock(block, offset int64) {
 		log.Printf("ERROR: offset %d >= block size %d", offset, i.f.eraseBlockCapacity)
 	}
 
-	i.activeBlockMap = append(i.activeBlockMap, block, offset+1)
+	var buf [2 * 8]byte
+	le.PutUint64(buf[0:], uint64(block))
+	le.PutUint64(buf[8:], uint64(offset+1))
+	_, err := i.f.chip.WriteAtBlock(i.index, buf[:], i.f.eraseBlockCapacity+i.activeBlocksOffset)
+	if err != nil {
+		log.Printf("ERROR: write of active blocks failed: %v", err)
+	}
+	i.activeBlocksOffset += int64(len(buf))
+
 	i.activeBlocks++
 }
 
 func (i *eraseBlockInfo) removeBlock(block int64) {
-	if int64(len(i.activeBlockMap)) >= (i.f.blocksPerEraseBlock * 4) {
-		log.Printf("ERROR: blockmap entries %d > expected %d",
-			len(i.activeBlockMap), (i.f.blocksPerEraseBlock * 4))
-	}
+	/*
+		if int64(len(i.activeBlockMap)) >= (i.f.blocksPerEraseBlock * 4) {
+			log.Printf("ERROR: blockmap entries %d > expected %d",
+				len(i.activeBlockMap), (i.f.blocksPerEraseBlock * 4))
+		}
+	*/
 
-	i.activeBlockMap = append(i.activeBlockMap, block, -1)
+	var buf [2 * 8]byte
+	offset := int64(-1)
+	le.PutUint64(buf[0:], uint64(block))
+	le.PutUint64(buf[8:], uint64(offset))
+	_, err := i.f.chip.WriteAtBlock(i.index, buf[:], i.f.eraseBlockCapacity+i.activeBlocksOffset)
+	if err != nil {
+		log.Printf("ERROR: write of active blocks failed: %v", err)
+	}
+	i.activeBlocksOffset += int64(len(buf))
+
 	i.activeBlocks--
 
 	if i.activeBlocks < 0 {
 		log.Printf("ERROR: invalid activeBlocks: %d", i.activeBlocks)
 	}
+}
+
+func (i *eraseBlockInfo) readActiveBlocks() []int64 {
+	bufSize := i.f.chip.EraseBlockSize() - i.f.eraseBlockCapacity
+	buf := make([]byte, bufSize)
+	_, err := i.f.chip.ReadAtBlock(i.index, buf, i.f.eraseBlockCapacity)
+	if err != nil {
+		log.Printf("ERROR: read of active blocks failed: %v", err)
+	}
+
+	var bs []int64
+	for i := 0; i < int(bufSize); i += 16 {
+		block := int64(le.Uint64(buf[i:]))
+		offset := int64(le.Uint64(buf[i+8:]))
+		bs = append(bs, block, offset)
+	}
+	return bs
 }
 
 type Ftl struct {
@@ -253,9 +291,10 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 
 	buf := make([]byte, f.blockSize)
 	liveBlocks := make(map[int64]int64)
-	for i := 0; i < len(gcEbi.activeBlockMap); i += 2 {
-		block := gcEbi.activeBlockMap[i]
-		offset := gcEbi.activeBlockMap[i+1]
+	activeBlocks := gcEbi.readActiveBlocks()
+	for i := 0; i < len(activeBlocks); i += 2 {
+		block := activeBlocks[i]
+		offset := activeBlocks[i+1]
 		if offset == 0 {
 			// End of entries
 			break
@@ -269,12 +308,16 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 	for block, offset := range liveBlocks {
 		_, err := f.chip.ReadAtBlock(gcEbi.index, buf, int64(offset))
 		if err != nil {
-			panic(err)
+			log.Printf("ERROR: ReadAtBlock(%d, %d, %d) error: %v",
+				gcEbi.index, len(buf), offset, err)
+			continue
 		}
 
 		err = f.writeBlock(buf, block, ebi.index)
 		if err != nil {
-			panic(err)
+			log.Printf("ERROR: writeBlock(%d, %d, %d) error: %v",
+				len(buf), block, ebi.index, err)
+			continue
 		}
 	}
 

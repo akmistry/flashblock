@@ -34,6 +34,7 @@ type eraseBlockInfo struct {
 
 	nextWrite int64
 
+	// TODO: Save this in the erase block
 	eraseCount int
 }
 
@@ -110,6 +111,27 @@ func (i *eraseBlockInfo) readActiveBlocks() []int64 {
 	return bs
 }
 
+func (i *eraseBlockInfo) readActiveBlocksMap() (map[int64]int64, int) {
+	activeBlocksMap := make(map[int64]int64)
+	activeBlocks := i.readActiveBlocks()
+	blockEntries := 0
+	for i := 0; i < len(activeBlocks); i += 2 {
+		block := activeBlocks[i]
+		offset := activeBlocks[i+1]
+		if offset == 0 {
+			// End of entries
+			break
+		}
+		blockEntries++
+		if offset > 0 {
+			activeBlocksMap[block] = offset - 1
+		} else {
+			delete(activeBlocksMap, block)
+		}
+	}
+	return activeBlocksMap, blockEntries
+}
+
 type Ftl struct {
 	// Size of a block/sector/page
 	blockSize int64
@@ -170,7 +192,26 @@ func New(blockSize int64, chip *flashblock.Chip) *Ftl {
 			index: int64(i),
 		}
 		f.eraseBlocks[i] = ebi
-		f.freeBlocks.PushBack(ebi)
+
+		activeBlocks, blockEntries := ebi.readActiveBlocksMap()
+		if len(activeBlocks) == 0 {
+			if blockEntries > 0 {
+				// Should have already been erased.
+				ebi.erase()
+			}
+			f.freeBlocks.PushBack(ebi)
+		} else {
+			ebi.activeBlocks = len(activeBlocks)
+			ebi.activeBlocksOffset = int64(blockEntries) * 16
+
+			log.Printf("Mapping used erase block %d, entries: %d", i, blockEntries)
+			log.Printf("Active blocks: %d, active block offset: %d",
+				ebi.activeBlocks, ebi.activeBlocksOffset)
+			for block, offset := range activeBlocks {
+				writeBlockIndex := f.eraseBlockOffsetToBlockIndex(int64(i), offset)
+				f.blockMap[block] = writeBlockIndex
+			}
+		}
 	}
 	log.Printf("block map entries: %d, erase blocks: %d, blocksPerEraseBlock: %d",
 		len(f.blockMap), len(f.eraseBlocks), f.blocksPerEraseBlock)
@@ -290,22 +331,8 @@ func (f *Ftl) fetchEmptyEraseBlock() *eraseBlockInfo {
 		gcEbi.index, lastContentLen, f.blocksPerEraseBlock)
 
 	buf := make([]byte, f.blockSize)
-	liveBlocks := make(map[int64]int64)
-	activeBlocks := gcEbi.readActiveBlocks()
-	for i := 0; i < len(activeBlocks); i += 2 {
-		block := activeBlocks[i]
-		offset := activeBlocks[i+1]
-		if offset == 0 {
-			// End of entries
-			break
-		}
-		if offset > 0 {
-			liveBlocks[block] = offset - 1
-		} else {
-			delete(liveBlocks, block)
-		}
-	}
-	for block, offset := range liveBlocks {
+	activeBlocks, _ := gcEbi.readActiveBlocksMap()
+	for block, offset := range activeBlocks {
 		_, err := f.chip.ReadAtBlock(gcEbi.index, buf, int64(offset))
 		if err != nil {
 			log.Printf("ERROR: ReadAtBlock(%d, %d, %d) error: %v",
@@ -362,11 +389,13 @@ func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
 			ebi.index, ebi.activeBlocks)
 		return
 	}
-	if !ebi.full() {
-		log.Printf("Avoid erasing non-full erase block %d with usage %d",
-			ebi.index, ebi.activeBlocks)
-		return
-	}
+	/*
+		if !ebi.full() {
+			log.Printf("Avoid erasing non-full erase block %d with usage %d",
+				ebi.index, ebi.activeBlocks)
+			return
+		}
+	*/
 
 	ebi.erase()
 	f.freeBlocks.PushBack(ebi)

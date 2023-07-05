@@ -70,13 +70,6 @@ func (i *eraseBlockInfo) appendSector(sector, offset int64) {
 }
 
 func (i *eraseBlockInfo) removeSector(sector int64) {
-	/*
-		if int64(len(i.activeBlockMap)) >= (i.f.sectorsPerEraseBlock * 4) {
-			log.Printf("ERROR: blockmap entries %d > expected %d",
-				len(i.activeBlockMap), (i.f.sectorsPerEraseBlock * 4))
-		}
-	*/
-
 	var buf [2 * 8]byte
 	offset := int64(-1)
 	le.PutUint64(buf[0:], uint64(sector))
@@ -362,8 +355,6 @@ func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 				eb.nextWrite, f.eraseBlockCapacity)
 		}
 
-		//log.Printf("Filled erase block %d: utilisation %d/%d",
-		//	eb.index, len(eb.contents), f.chip.EraseBlockSize()/f.sectorSize)
 		eb = nil
 		f.currentWriteEraseBlock = nil
 	}
@@ -380,27 +371,12 @@ func (f *Ftl) fetchWriteBlock() *eraseBlockInfo {
 }
 
 func (f *Ftl) freeEraseBlockIfEmpty(ebi *eraseBlockInfo) {
-	if ebi.activeSectors > 0 {
+	if ebi.activeSectors > 0 || ebi == f.currentWriteEraseBlock {
 		return
 	}
-
-	if ebi == f.currentWriteEraseBlock {
-		log.Printf("Avoid erasing current erase block %d with usage %d",
-			ebi.index, ebi.activeSectors)
-		return
-	}
-	/*
-		if !ebi.full() {
-			log.Printf("Avoid erasing non-full erase block %d with usage %d",
-				ebi.index, ebi.activeSectors)
-			return
-		}
-	*/
 
 	ebi.erase()
 	f.freeBlocks.PushBack(ebi)
-	//log.Printf("==== Erase block %d empty, erasing and freeing. Free blocks %d",
-	//	ebi.index, f.freeBlocks.Len())
 }
 
 func (f *Ftl) writeSector(p []byte, sector, eraseBlock int64) error {

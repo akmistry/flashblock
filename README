@@ -1,0 +1,28 @@
+flashblock
+==========
+
+A simple simulated flash-based block device. The idea is to simulate the
+behaviour of a (NAND) flash-based storage device, which only allows write-once
+sectors and erasing of whole erase blocks. A simple Flash Translation Layer
+(FTL) has been implemented to expose block device sematics.
+
+The reason for writing this is mainly a learning exercise and curiosity. I
+wanted a tool to be able to measure the effect of write amplification and erase
+block lifetimes, on certain Linux workloads (git, compiling, databases, etc).
+Although SSDs generally expose some metrics through SMART, finer granularity
+statistics such as histograms of erase block utilisation or erase counts are
+not visible to the average user.
+
+So to gather these kind of statistics, I decided to implement a block device
+which simulates (very poorly) an SSD and tracks these statistics.
+
+This is a work-in-progress, so only basic histograms and logs are outputted.
+Machine-readable/analysable logs are a future me problem. In addition, the
+basic FTL isn't very good, and doesn't accurately simulate the behaviour of
+NAND flash. In particular, it performs word-sized writes, which flash devices
+may not do (at least from what I've seen looking at a few datasheets).
+
+License
+=======
+
+flashblock is released under the MIT license.

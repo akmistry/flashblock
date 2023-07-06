@@ -197,17 +197,12 @@ func New(sectorSize int64, chip *flashblock.Chip) *Ftl {
 			ebi.activeSectors = len(activeSectors)
 			ebi.activeSectorsOffset = int64(blockEntries) * 16
 
-			log.Printf("Mapping used erase block %d, entries: %d", i, blockEntries)
-			log.Printf("Active blocks: %d, active block offset: %d",
-				ebi.activeSectors, ebi.activeSectorsOffset)
 			for sector, offset := range activeSectors {
 				writeSectorIndex := f.eraseBlockOffsetToSectorIndex(int64(i), offset)
 				f.sectorMap[sector] = writeSectorIndex
 			}
 		}
 	}
-	log.Printf("sector map entries: %d, erase blocks: %d, sectorsPerEraseBlock: %d",
-		len(f.sectorMap), len(f.eraseBlocks), f.sectorsPerEraseBlock)
 
 	go f.dumpHist()
 
@@ -451,8 +446,6 @@ func (f *Ftl) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (f *Ftl) Trim(off int64, length uint32) error {
-	log.Printf("Trim(off = %d, len = %d)", off, length)
-
 	if off%f.sectorSize != 0 {
 		return errUnalignedOffset
 	} else if int64(length)%f.sectorSize != 0 {
